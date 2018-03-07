@@ -1,58 +1,107 @@
 diff --git a/arch/x86/entry/syscalls/syscall_32.tbl b/arch/x86/entry/syscalls/syscall_32.tbl
-index 448ac21..daa0d34 100644
+index 448ac21..38b16dd 100644
 --- a/arch/x86/entry/syscalls/syscall_32.tbl
 +++ b/arch/x86/entry/syscalls/syscall_32.tbl
-@@ -391,3 +391,4 @@
+@@ -391,3 +391,5 @@
  382	i386	pkey_free		sys_pkey_free
  383	i386	statx			sys_statx
  384	i386	arch_prctl		sys_arch_prctl			compat_sys_arch_prctl
 +385	i386	get_unique_id		sys_get_unique_id
++386	i386	get_child_pids		sys_get_child_pids
 \ No newline at end of file
 diff --git a/arch/x86/entry/syscalls/syscall_64.tbl b/arch/x86/entry/syscalls/syscall_64.tbl
-index 5aef183..37e9ba0 100644
+index 5aef183..2308976 100644
 --- a/arch/x86/entry/syscalls/syscall_64.tbl
 +++ b/arch/x86/entry/syscalls/syscall_64.tbl
-@@ -339,6 +339,7 @@
+@@ -339,6 +339,8 @@
  330	common	pkey_alloc		sys_pkey_alloc
  331	common	pkey_free		sys_pkey_free
  332	common	statx			sys_statx
 +333	common	get_unique_id		sys_get_unique_id
++334	common	get_child_pids		sys_get_child_pids
  
  #
  # x32-specific system call numbers start at 512 to avoid cache impact
 diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
-index a78186d..5469bca 100644
+index a78186d..18d68c4 100644
 --- a/include/linux/syscalls.h
 +++ b/include/linux/syscalls.h
-@@ -941,4 +941,6 @@ asmlinkage long sys_pkey_free(int pkey);
+@@ -941,4 +941,7 @@ asmlinkage long sys_pkey_free(int pkey);
  asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
  			  unsigned mask, struct statx __user *buffer);
  
 +asmlinkage long sys_get_unique_id(int *uuid);
++asmlinkage long sys_get_child_pids(pid_t *list, size_t limit, size_t *num_children);
 +
  #endif
 diff --git a/kernel/Makefile b/kernel/Makefile
-index 172d151d..78bdc47 100644
+index 172d151d..ed6c909 100644
 --- a/kernel/Makefile
 +++ b/kernel/Makefile
-@@ -3,7 +3,7 @@
+@@ -3,7 +3,8 @@
  # Makefile for the linux kernel.
  #
  
 -obj-y     = fork.o exec_domain.o panic.o \
-+obj-y     = get_unique_id.o fork.o exec_domain.o panic.o \
++obj-y     = get_unique_id.o get_child_pids.o \
++	    fork.o exec_domain.o panic.o \
  	    cpu.o exit.o softirq.o resource.o \
  	    sysctl.o sysctl_binary.o capability.o ptrace.o user.o \
  	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
+diff --git a/kernel/get_child_pids.c b/kernel/get_child_pids.c
+new file mode 100644
+index 0000000..0a9b99d
+--- /dev/null
++++ b/kernel/get_child_pids.c
+@@ -0,0 +1,38 @@
++#include <linux/linkage.h>
++#include <linux/types.h>
++#include <linux/sched.h>
++#include <linux/list.h>
++#include <linux/uaccess.h>
++#include <linux/errno.h>
++
++asmlinkage long sys_get_child_pids(pid_t *list, size_t limit, size_t *num_children)
++{
++	/* Check memory address validity */
++	if (!access_ok(VERIFY_WRITE, num_children, sizeof(size_t)))
++		return -EFAULT;
++	if (!access_ok(VERIFY_WRITE, list, limit * sizeof(size_t)))
++		if (limit != 0 || list != NULL)
++			return -EFAULT;
++			
++	/* Get and store child PIDs into list*/
++	struct task_struct *child;
++	size_t i = 0;
++	list_for_each_entry(child, &current->children, sibling)	{
++		if (i < limit) {
++			if (put_user(child->pid, list + i) != 0)
++				return -EFAULT;
++		}
++		i++;
++	}
++
++	/* Store number of children */
++	size_t child_num = i;
++	if (put_user(child_num, num_children) != 0)
++		return -EFAULT;
++
++	if (limit == 0 || limit >= child_num) {
++		return 0;
++	} else {
++		return -ENOBUFS;
++	}
++}
+\ No newline at end of file
 diff --git a/kernel/get_unique_id.c b/kernel/get_unique_id.c
 new file mode 100644
-index 0000000..ead68d0
+index 0000000..9bf30f8
 --- /dev/null
 +++ b/kernel/get_unique_id.c
 @@ -0,0 +1,11 @@
 +#include <linux/linkage.h>
 +#include <linux/uaccess.h>
-+#include <asm/atomic.h>
++#include <linux/atomic.h>
 +
 +static atomic_t uuid_gen = ATOMIC_INIT(0);
 +
