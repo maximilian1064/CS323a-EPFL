@@ -1,0 +1,36 @@
+Athuor: Lei Yan
+Date:   Mar/08/2018
+
+#1 SYSCALL IMPLEMENTATION:
+
+(1) get_unique_id:
+
+For this syscall I simply used an atomic counter to return unique IDs.
+At each call to this syscall, the atomic counter will increment atomically through
+an atomic operation "atomic_inc_return()", ensures the IDs returned to be unique.
+
+!NOTICE: As the type of ID is int, the syscall will cease to work properly after the
+counter overflows. To keep the simplicity of the syscall, I didn't add overflow handling
+in the code, the user should be responsible for not calling the syscall too much times.
+
+(2) get_child_ids:
+
+I extend the functionality of this syscall to make it able to store IDs of all the
+descendents. The implementation is divided into following steps.
+
+1. Check memory address validity with access_ok().
+2. Traverse the descendents recursively with help of list_for_each_entry(),
+   counting number of descendents, and store PIDs into a kernel space buffer.
+   This step is protected by tasklist_lock.
+3. Copy the PIDs from buffer to user space, specify appropriate return values.
+
+
+#2 SELF TESTS:
+
+I add three self tests in the folder tests/, these are
+
+(1) 
+
+(2)
+
+(3)

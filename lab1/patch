@@ -50,38 +50,38 @@ index 172d151d..ed6c909 100644
  	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
 diff --git a/kernel/get_child_pids.c b/kernel/get_child_pids.c
 new file mode 100644
-index 0000000..638de7a
+index 0000000..5c7e9d5
 --- /dev/null
 +++ b/kernel/get_child_pids.c
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,76 @@
 +#include <linux/linkage.h>
 +#include <linux/types.h>
 +#include <linux/sched.h>
 +#include <linux/list.h>
 +#include <linux/uaccess.h>
 +#include <linux/errno.h>
++#include <linux/slab.h>
++#include <linux/sched/task.h>
++#include <linux/rwlock.h>
 +
-+static long store_descendent_pid(pid_t *list, size_t limit, size_t *num_descendent, struct task_struct *curr_task)
++static void store_descendent_pid(pid_t *list, size_t limit, size_t *num_descendent, struct task_struct *curr_task)
 +{
 +	struct task_struct *child;
 +	list_for_each_entry(child, &curr_task->children, sibling) {
 +		/* Try to store child PID */
-+		if (*num_descendent < limit) {
-+			if (put_user(child->pid, list + *num_descendent) != 0)
-+				return -EFAULT;
-+		}
++		if (*num_descendent < limit)
++			*(list + *num_descendent) = child->pid;	
 +		(*num_descendent)++;
-+
 +		/* Traversing descendents of child */
-+		if (store_descendent_pid(list, limit, num_descendent, child) != 0)
-+			return -EFAULT;
++		store_descendent_pid(list, limit, num_descendent, child);
 +	}
-+	return 0;
 +}
 +
 +asmlinkage long sys_get_child_pids(pid_t *list, size_t limit, size_t *num_children)
 +{
 +	size_t child_num;
++	pid_t *pid_buf;
++	long ret;
 +
 +	/* Check memory address validity */
 +	if (!access_ok(VERIFY_WRITE, num_children, sizeof(size_t)))
@@ -93,20 +93,42 @@ index 0000000..638de7a
 +	/* 
 +	 * Get and store PIDs of descendents into list
 +	 * Count number of descendents
++	 * 
++	 * To protect tasklist we need to use tasklist_lock
++	 * here, which is a spinlock. put_user() can sleep
++	 * thus can't be used to store PIDs directly when
++	 * traversing the task lists. As a solution a pid_buf
++	 * is used to store PIDs temporarily which will be copied
++	 * to the userspace later 
++	 *
 +	 */
++	pid_buf = kmalloc(limit * sizeof(pid_t), GFP_KERNEL);
 +	child_num = 0;
-+	if(store_descendent_pid(list, limit, &child_num, current) != 0)
-+		return -EFAULT;
++
++	read_lock(&tasklist_lock);
++	store_descendent_pid(pid_buf, limit, &child_num, current);
++	read_unlock(&tasklist_lock);
 +
 +	/* Store number of children */
 +	if (put_user(child_num, num_children) != 0)
 +		return -EFAULT;
 +
-+	if (limit == 0 || limit >= child_num) {
-+		return 0;
++	/* Copy PIDs to userspace */
++	if (limit == 0) {
++		ret = 0;
++	} else if (limit >= child_num) {
++		ret = copy_to_user(list, pid_buf, child_num * sizeof(pid_t));
 +	} else {
-+		return -ENOBUFS;
++		if (copy_to_user(list, pid_buf, limit * sizeof(pid_t)) != 0)
++			ret = -EFAULT;
++		else
++			ret = -ENOBUFS;
 +	}
++
++	if (pid_buf)
++		kfree(pid_buf);
++	
++	return ret;
 +}
 \ No newline at end of file
 diff --git a/kernel/get_unique_id.c b/kernel/get_unique_id.c
