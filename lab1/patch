@@ -50,10 +50,10 @@ index 172d151d..ed6c909 100644
  	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
 diff --git a/kernel/get_child_pids.c b/kernel/get_child_pids.c
 new file mode 100644
-index 0000000..0a9b99d
+index 0000000..638de7a
 --- /dev/null
 +++ b/kernel/get_child_pids.c
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,54 @@
 +#include <linux/linkage.h>
 +#include <linux/types.h>
 +#include <linux/sched.h>
@@ -61,8 +61,28 @@ index 0000000..0a9b99d
 +#include <linux/uaccess.h>
 +#include <linux/errno.h>
 +
++static long store_descendent_pid(pid_t *list, size_t limit, size_t *num_descendent, struct task_struct *curr_task)
++{
++	struct task_struct *child;
++	list_for_each_entry(child, &curr_task->children, sibling) {
++		/* Try to store child PID */
++		if (*num_descendent < limit) {
++			if (put_user(child->pid, list + *num_descendent) != 0)
++				return -EFAULT;
++		}
++		(*num_descendent)++;
++
++		/* Traversing descendents of child */
++		if (store_descendent_pid(list, limit, num_descendent, child) != 0)
++			return -EFAULT;
++	}
++	return 0;
++}
++
 +asmlinkage long sys_get_child_pids(pid_t *list, size_t limit, size_t *num_children)
 +{
++	size_t child_num;
++
 +	/* Check memory address validity */
 +	if (!access_ok(VERIFY_WRITE, num_children, sizeof(size_t)))
 +		return -EFAULT;
@@ -70,19 +90,15 @@ index 0000000..0a9b99d
 +		if (limit != 0 || list != NULL)
 +			return -EFAULT;
 +			
-+	/* Get and store child PIDs into list*/
-+	struct task_struct *child;
-+	size_t i = 0;
-+	list_for_each_entry(child, &current->children, sibling)	{
-+		if (i < limit) {
-+			if (put_user(child->pid, list + i) != 0)
-+				return -EFAULT;
-+		}
-+		i++;
-+	}
++	/* 
++	 * Get and store PIDs of descendents into list
++	 * Count number of descendents
++	 */
++	child_num = 0;
++	if(store_descendent_pid(list, limit, &child_num, current) != 0)
++		return -EFAULT;
 +
 +	/* Store number of children */
-+	size_t child_num = i;
 +	if (put_user(child_num, num_children) != 0)
 +		return -EFAULT;
 +
