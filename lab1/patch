@@ -50,10 +50,10 @@ index 172d151d..ed6c909 100644
  	    signal.o sys.o umh.o workqueue.o pid.o task_work.o \
 diff --git a/kernel/get_child_pids.c b/kernel/get_child_pids.c
 new file mode 100644
-index 0000000..5c7e9d5
+index 0000000..e94fbfd
 --- /dev/null
 +++ b/kernel/get_child_pids.c
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,80 @@
 +#include <linux/linkage.h>
 +#include <linux/types.h>
 +#include <linux/sched.h>
@@ -64,13 +64,17 @@ index 0000000..5c7e9d5
 +#include <linux/sched/task.h>
 +#include <linux/rwlock.h>
 +
++/*
++ * Traversing all the descendents of curr_task,
++ * store their PIDs into list(in kernel sapce)
++ */
 +static void store_descendent_pid(pid_t *list, size_t limit, size_t *num_descendent, struct task_struct *curr_task)
 +{
 +	struct task_struct *child;
 +	list_for_each_entry(child, &curr_task->children, sibling) {
 +		/* Try to store child PID */
 +		if (*num_descendent < limit)
-+			*(list + *num_descendent) = child->pid;	
++			*(list + *num_descendent) = child->pid;
 +		(*num_descendent)++;
 +		/* Traversing descendents of child */
 +		store_descendent_pid(list, limit, num_descendent, child);
@@ -89,17 +93,17 @@ index 0000000..5c7e9d5
 +	if (!access_ok(VERIFY_WRITE, list, limit * sizeof(size_t)))
 +		if (limit != 0 || list != NULL)
 +			return -EFAULT;
-+			
-+	/* 
++
++	/*
 +	 * Get and store PIDs of descendents into list
 +	 * Count number of descendents
-+	 * 
++	 *
 +	 * To protect tasklist we need to use tasklist_lock
 +	 * here, which is a spinlock. put_user() can sleep
 +	 * thus can't be used to store PIDs directly when
 +	 * traversing the task lists. As a solution a pid_buf
 +	 * is used to store PIDs temporarily which will be copied
-+	 * to the userspace later 
++	 * to the userspace later
 +	 *
 +	 */
 +	pid_buf = kmalloc(limit * sizeof(pid_t), GFP_KERNEL);
@@ -127,24 +131,25 @@ index 0000000..5c7e9d5
 +
 +	if (pid_buf)
 +		kfree(pid_buf);
-+	
++
 +	return ret;
 +}
-\ No newline at end of file
 diff --git a/kernel/get_unique_id.c b/kernel/get_unique_id.c
 new file mode 100644
-index 0000000..9bf30f8
+index 0000000..b5d6d23
 --- /dev/null
 +++ b/kernel/get_unique_id.c
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,13 @@
 +#include <linux/linkage.h>
 +#include <linux/uaccess.h>
 +#include <linux/atomic.h>
 +
++/* Atomic counter */
 +static atomic_t uuid_gen = ATOMIC_INIT(0);
 +
 +asmlinkage long sys_get_unique_id(int *uuid)
 +{
-+	int tmp = atomic_inc_return(&uuid_gen);
-+	return put_user(tmp, uuid);
++	/* Atomic increment and return the counter value */
++	int val = atomic_inc_return(&uuid_gen);
++	return put_user(val, uuid);
 +}

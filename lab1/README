@@ -29,8 +29,17 @@ descendents. The implementation is divided into following steps.
 
 I add three self tests in the folder tests/, these are
 
-(1) 
+(1) concurrent_uniq_test.c: Test correctness of syscall get_unique_id() in concurrent
+    environmet. Make 100000 successive calls to get_unique_id(), concurrently by 4 
+    threads using OpenMP.
 
-(2)
+(2) child_pids_test.c: Test the basic functionality of syscall get_child_ids(), especially
+    the return value in different case.
 
-(3)
+(3) descendent_pids_test.c: Test if the syscall get_child_ids() can retrieve all the
+    descendents of current process.
+
+
+To compile and run the tests, use
+
+$ make run
