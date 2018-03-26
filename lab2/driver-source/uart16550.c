@@ -2,6 +2,9 @@
 #include <linux/module.h>
 #include <linux/device.h>
 #include <linux/kdev_t.h>
+#include <linux/moduleparam.h>
+#include <linux/errno.h>
+#include <linux/fs.h>
 #include "uart16550.h"
 #include "uart16550_hw.h"
 
@@ -17,9 +20,19 @@ MODULE_LICENSE("GPL");
 
 static struct class *uart16550_class = NULL;
 /*
- * TODO: Populate major number from module options (when it is given).
+ * Module parameters
  */
 static int major = 42;
+static int behavior = 0x3;
+module_param(major, int, 0);
+module_param(behavior, int, 0);
+
+/*
+ * Flags used in module init/clean_up
+ */
+static int have_com1 = 0;
+static int have_com2 = 0;
+static int dev_count, first_minor;
 
 static ssize_t uart16550_write(struct file *file, const char __user *user_buffer,
         size_t size, loff_t *offset)
@@ -81,7 +94,44 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
 
 static int uart16550_init(void)
 {
-        int have_com1, have_com2;
+        int err;
+        struct device *dev_ret;
+        /*
+         * Parsing module parameters
+         */
+        switch (behavior) {
+                case 0x1 :
+                        have_com1 = 1;
+                        dev_count = 1;
+                        first_minor = 0; 
+                        break;
+                case 0x2 :
+                        have_com2 = 1;
+                        dev_count = 1;
+                        first_minor = 1; 
+                        break;
+                case 0x3 :
+                        have_com1 = 1;
+                        have_com2 = 1;
+                        dev_count = 2;
+                        first_minor = 0; 
+                        break;
+                default :
+                        err = -EINVAL;
+                        dprintk("Bad module parameters\n");
+                        goto nothing_to_undo;
+        }
+
+        /*
+         * Register character device numbers
+         */
+        err = register_chrdev_region(MKDEV(major, first_minor), dev_count,
+                "uart16550");
+        if (err) {
+                dprintk("Fail registering chrdev region\n");
+                goto nothing_to_undo; 
+        }
+
         /*
          * TODO: Write driver initialization code here.
          * TODO: have_com1 & have_com2 need to be set according to the
@@ -93,25 +143,75 @@ static int uart16550_init(void)
          * Setup a sysfs class & device to make /dev/com1 & /dev/com2 appear.
          */
         uart16550_class = class_create(THIS_MODULE, "uart16550");
+        if (IS_ERR(uart16550_class)) {
+                dprintk("Fail creating sysfs class\n");
+                err = PTR_ERR(uart16550_class);
+                goto undo_reg_chrdev_region;
+        }
 
         if (have_com1) {
                 /* Setup the hardware device for COM1 */
-                uart16550_hw_setup_device(COM1_BASEPORT, THIS_MODULE->name);
+                err = uart16550_hw_setup_device(COM1_BASEPORT, THIS_MODULE->name);
+                if (err) {
+                        dprintk("Fail setting up hw device COM1\n");
+                        goto undo_sysfs_class_create; 
+                }
+
                 /* Create the sysfs info for /dev/com1 */
-                device_create(uart16550_class, NULL, MKDEV(major, 0), NULL, "com1");
+                dev_ret = device_create(uart16550_class, NULL, MKDEV(major, 0),
+                        NULL, "com1");
+                if (IS_ERR(dev_ret)) {
+                        dprintk("Fail device_create COM1\n");
+                        err = PTR_ERR(dev_ret);
+                        goto undo_hw_setup_COM1;
+                }
         }
         if (have_com2) {
                 /* Setup the hardware device for COM2 */
-                uart16550_hw_setup_device(COM2_BASEPORT, THIS_MODULE->name);
+                err = uart16550_hw_setup_device(COM2_BASEPORT, THIS_MODULE->name);
+                if (err) {
+                        dprintk("Fail setting up hw device COM2\n");
+                        goto undo_dev_create_COM1; 
+                }
+
                 /* Create the sysfs info for /dev/com2 */
-                device_create(uart16550_class, NULL, MKDEV(major, 1), NULL, "com2");
+                dev_ret = device_create(uart16550_class, NULL, MKDEV(major, 1),
+                        NULL, "com2");
+                if (IS_ERR(dev_ret)) {
+                        dprintk("Fail device_create COM2\n");
+                        err = PTR_ERR(dev_ret);
+                        goto undo_hw_setup_COM2;
+                }
         }
+
+        /*
+         * Success
+         */
         return 0;
+
+        /*
+         * Error handling
+         * Undo things
+         */
+undo_hw_setup_COM2:
+        if (have_com2)
+                uart16550_hw_cleanup_device(COM2_BASEPORT);       
+undo_dev_create_COM1:
+        if (have_com1)
+                device_destroy(uart16550_class, MKDEV(major, 0));       
+undo_hw_setup_COM1:
+        if (have_com1)
+                uart16550_hw_cleanup_device(COM1_BASEPORT);       
+undo_sysfs_class_create:
+        class_destroy(uart16550_class);
+undo_reg_chrdev_region:      
+        unregister_chrdev_region(MKDEV(major, first_minor), dev_count);
+nothing_to_undo:
+        return err;
 }
 
 static void uart16550_cleanup(void)
 {
-        int have_com1, have_com2;
         /*
          * TODO: Write driver cleanup code here.
          * TODO: have_com1 & have_com2 need to be set according to the
@@ -134,7 +234,12 @@ static void uart16550_cleanup(void)
          * Cleanup the sysfs device class.
          */
         class_destroy(uart16550_class);
+
+        /*
+         * unregister character device numbers
+         */
+        unregister_chrdev_region(MKDEV(major, first_minor), dev_count);
 }
 
-module_init(uart16550_init)
-module_exit(uart16550_cleanup)
+module_init(uart16550_init);
+module_exit(uart16550_cleanup);
