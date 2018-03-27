@@ -5,6 +5,7 @@
 #include <linux/moduleparam.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/cdev.h>
 #include "uart16550.h"
 #include "uart16550_hw.h"
 
@@ -30,9 +31,43 @@ module_param(behavior, int, 0);
 /*
  * Flags used in module init/clean_up
  */
-static int have_com1 = 0;
-static int have_com2 = 0;
-static int dev_count, first_minor;
+static int have_com1, have_com2, dev_count, first_minor;
+
+/*
+ * File operation structure
+ */
+static const struct file_operations uart16550_fops = {
+        .owner = THIS_MODULE
+};
+
+/*
+ * Device specific structure
+ */
+struct uart16550_dev {
+        struct cdev cdev;
+};
+
+static struct uart16550_dev uart16550_dev_COM1, uart16550_dev_COM2;
+
+/*
+ * Setup cdev
+ */
+static int uart16550_setup_cdev(struct uart16550_dev *dev, int minor)
+{
+        int err;
+        dev_t dev_num = MKDEV(major, minor);
+
+        cdev_init(&dev->cdev, &uart16550_fops);
+        dev->cdev.owner = THIS_MODULE;
+
+        err = cdev_add(&dev->cdev, dev_num, 1);
+        if (err) {
+                dprintk("Fail add cdev, device minor number: %d\n", minor);
+                return err;
+        }
+
+        return 0;
+}
 
 static ssize_t uart16550_write(struct file *file, const char __user *user_buffer,
         size_t size, loff_t *offset)
@@ -102,10 +137,12 @@ static int uart16550_init(void)
         switch (behavior) {
                 case 0x1 :
                         have_com1 = 1;
+                        have_com2 = 0;
                         dev_count = 1;
                         first_minor = 0; 
                         break;
                 case 0x2 :
+                        have_com1 = 0;
                         have_com2 = 1;
                         dev_count = 1;
                         first_minor = 1; 
@@ -165,13 +202,18 @@ static int uart16550_init(void)
                         err = PTR_ERR(dev_ret);
                         goto undo_hw_setup_COM1;
                 }
+
+                /* Register COM1 to the kernel */ 
+                err = uart16550_setup_cdev(&uart16550_dev_COM1, 0);
+                if (err)
+                        goto undo_dev_create_COM1;
         }
         if (have_com2) {
                 /* Setup the hardware device for COM2 */
                 err = uart16550_hw_setup_device(COM2_BASEPORT, THIS_MODULE->name);
                 if (err) {
                         dprintk("Fail setting up hw device COM2\n");
-                        goto undo_dev_create_COM1; 
+                        goto undo_dev_reg_COM1; 
                 }
 
                 /* Create the sysfs info for /dev/com2 */
@@ -182,6 +224,11 @@ static int uart16550_init(void)
                         err = PTR_ERR(dev_ret);
                         goto undo_hw_setup_COM2;
                 }
+
+                /* Register COM2 to the kernel */ 
+                err = uart16550_setup_cdev(&uart16550_dev_COM2, 1);
+                if (err)
+                        goto undo_dev_create_COM2;
         }
 
         /*
@@ -193,9 +240,15 @@ static int uart16550_init(void)
          * Error handling
          * Undo things
          */
+undo_dev_create_COM2:
+        if (have_com2)
+                device_destroy(uart16550_class, MKDEV(major, 1));       
 undo_hw_setup_COM2:
         if (have_com2)
                 uart16550_hw_cleanup_device(COM2_BASEPORT);       
+undo_dev_reg_COM1:
+        if (have_com1)
+                cdev_del(&uart16550_dev_COM1.cdev);
 undo_dev_create_COM1:
         if (have_com1)
                 device_destroy(uart16550_class, MKDEV(major, 0));       
@@ -218,12 +271,16 @@ static void uart16550_cleanup(void)
          *      module parameters.
          */
         if (have_com1) {
+                /* Unregister COM1 from kernel */
+                cdev_del(&uart16550_dev_COM1.cdev);
                 /* Reset the hardware device for COM1 */
                 uart16550_hw_cleanup_device(COM1_BASEPORT);
                 /* Remove the sysfs info for /dev/com1 */
                 device_destroy(uart16550_class, MKDEV(major, 0));
         }
         if (have_com2) {
+                /* Unregister COM2 from kernel */
+                cdev_del(&uart16550_dev_COM2.cdev);
                 /* Reset the hardware device for COM2 */
                 uart16550_hw_cleanup_device(COM2_BASEPORT);
                 /* Remove the sysfs info for /dev/com2 */
