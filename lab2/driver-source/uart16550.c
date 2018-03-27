@@ -36,8 +36,19 @@ static int have_com1, have_com2, dev_count, first_minor;
 /*
  * File operation structure
  */
+static int uart16550_open(struct inode *inode, struct file *filp);
+static int uart16550_release(struct inode *inode, struct file *filp);
+static ssize_t uart16550_read(struct file *filp, char __user *user_buffer,
+        size_t size, loff_t *offset);
+static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer,
+        size_t size, loff_t *offset);
+
 static const struct file_operations uart16550_fops = {
-        .owner = THIS_MODULE
+        .owner = THIS_MODULE,
+        .open = uart16550_open,
+        .read = uart16550_read,
+        .write = uart16550_write,
+        .release = uart16550_release
 };
 
 /*
@@ -69,6 +80,38 @@ static int uart16550_setup_cdev(struct uart16550_dev *dev, int minor)
         return 0;
 }
 
+/*
+ * File operations
+ */
+static int uart16550_open(struct inode *inode, struct file *filp)
+{
+        dprintk("open()\n");
+        return 0;
+}
+
+static int uart16550_release(struct inode *inode, struct file *filp)
+{
+        dprintk("release()\n");
+        return 0;
+}
+
+static ssize_t uart16550_read(struct file *filp, char __user *user_buffer,
+        size_t size, loff_t *offset)
+{
+        dprintk("read()\n");
+        return 0;
+}
+
+static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer,
+        size_t size, loff_t *offset)
+{
+        dprintk("write()\n");
+        return size;
+}
+
+/* TODO: unlocked_ioctl */
+
+#ifdef UART16550_WRITE
 static ssize_t uart16550_write(struct file *file, const char __user *user_buffer,
         size_t size, loff_t *offset)
 {
@@ -86,6 +129,7 @@ static ssize_t uart16550_write(struct file *file, const char __user *user_buffer
 
         return bytes_copied;
 }
+#endif
 
 irqreturn_t interrupt_handler(int irq_no, void *data)
 {
