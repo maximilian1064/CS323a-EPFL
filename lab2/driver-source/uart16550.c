@@ -9,6 +9,7 @@
 #include <linux/kfifo.h>
 #include <linux/uaccess.h>
 #include <linux/interrupt.h>
+#include <linux/wait.h>
 #include "uart16550.h"
 #include "uart16550_hw.h"
 
@@ -61,6 +62,8 @@ struct uart16550_dev {
         struct cdev cdev;
         DECLARE_KFIFO(write_buf, char, FIFO_SIZE);
         DECLARE_KFIFO(read_buf, char, FIFO_SIZE);
+        wait_queue_head_t read_q;
+        wait_queue_head_t write_q;
 };
 
 static struct uart16550_dev uart16550_dev_COM1, uart16550_dev_COM2;
@@ -115,16 +118,15 @@ static ssize_t uart16550_read(struct file *filp, char __user *user_buffer,
         if (!access_ok(VERIFY_WRITE, user_buffer, size))
                 return -EFAULT;
 
-        if (!kfifo_is_empty(&dev->read_buf)) {
-                if (kfifo_to_user(&dev->read_buf, user_buffer, size, &bytes_copied))
-                        return -EFAULT;
-        } else {
-                dprintk("nothing read\n");
-        }
+        wait_event_interruptible(dev->read_q, !kfifo_is_empty(&dev->read_buf));
+        if (kfifo_to_user(&dev->read_buf, user_buffer, size, &bytes_copied))
+                return -EFAULT;
+
         dprintk("read() %d bytes\n", bytes_copied);
         return bytes_copied;
 }
 
+#ifdef jkjl______
 static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer,
         size_t size, loff_t *offset)
 {
@@ -144,15 +146,22 @@ static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer
         dprintk("write() %d bytes\n", bytes_copied);
         return bytes_copied;
 }
+#endif
 
 /* TODO: unlocked_ioctl */
 
-#ifdef UART16550_WRITE
-static ssize_t uart16550_write(struct file *file, const char __user *user_buffer,
+static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer,
         size_t size, loff_t *offset)
 {
         int bytes_copied;
         u32 device_port;
+        struct uart16550_dev *dev = filp->private_data;
+
+        if (dev == &uart16550_dev_COM1) {
+                device_port = COM1_BASEPORT;
+        } else {
+                device_port = COM2_BASEPORT;
+        }
         /*
          * TODO: Write the code that takes the data provided by the
          *      user from userspace and stores it in the kernel
@@ -160,16 +169,24 @@ static ssize_t uart16550_write(struct file *file, const char __user *user_buffer
          * TODO: Populate bytes_copied with the number of bytes
          *      that fit in the outgoing buffer.
          */
+        /* Reject bad user address at first place */
+        if (!access_ok(VERIFY_READ, user_buffer, size))
+                return -EFAULT;
+
+        wait_event_interruptible(dev->write_q, !kfifo_is_full(&dev->write_buf));
+        if (kfifo_from_user(&dev->write_buf, user_buffer, size, &bytes_copied))
+                return -EFAULT;
+
+        dprintk("write() %d bytes\n", bytes_copied);
 
         uart16550_hw_force_interrupt_reemit(device_port);
 
         return bytes_copied;
 }
-#endif
 
 irqreturn_t interrupt_handler(int irq_no, void *data)
 {
-        int device_status;
+        int device_status, device_status_tmp;
         u32 device_port;
         /*
          * TODO: Write the code that handles a hardware interrupt.
@@ -184,8 +201,8 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
         }
 
         device_status = uart16550_hw_get_device_status(device_port);
+        device_status_tmp = device_status;
 
-#ifdef INTERRRR
         while (uart16550_hw_device_can_send(device_status)) {
                 u8 byte_value;
                 /*
@@ -198,10 +215,13 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
                  *      OR
                  *   b) send the data separately.
                  */
+                if (!kfifo_get(&dev->write_buf, &byte_value))
+                        goto ret;
                 uart16550_hw_write_to_device(device_port, byte_value);
                 device_status = uart16550_hw_get_device_status(device_port);
         }
-#endif
+        if (uart16550_hw_device_can_send(device_status_tmp))
+                wake_up_interruptible(&dev->write_q);
 
         while (uart16550_hw_device_has_data(device_status)) {
                 u8 byte_value;
@@ -213,7 +233,10 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
                 kfifo_put(&dev->read_buf, byte_value);
                 device_status = uart16550_hw_get_device_status(device_port);
         }
+        if (uart16550_hw_device_has_data(device_status_tmp))
+                wake_up_interruptible(&dev->read_q);
 
+ret:
         return IRQ_HANDLED;
 }
 
@@ -247,6 +270,12 @@ static int uart16550_init(void)
                         err = -EINVAL;
                         dprintk("Bad module parameters\n");
                         goto nothing_to_undo;
+        }
+
+        if (major >= 512) {
+                err = -EINVAL;
+                dprintk("Bad module parameters\n");
+                goto nothing_to_undo;
         }
 
         /*
@@ -290,6 +319,10 @@ static int uart16550_init(void)
                 INIT_KFIFO(uart16550_dev_COM1.write_buf);
                 INIT_KFIFO(uart16550_dev_COM1.read_buf);
 
+                /* Wait queue */
+                init_waitqueue_head(&uart16550_dev_COM1.write_q);
+                init_waitqueue_head(&uart16550_dev_COM1.read_q);
+
                 /* Register COM1 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM1, 0);
                 if (err) {
@@ -325,6 +358,10 @@ static int uart16550_init(void)
                 /* Init buffers of COM2 */
                 INIT_KFIFO(uart16550_dev_COM2.write_buf);
                 INIT_KFIFO(uart16550_dev_COM2.read_buf);
+
+                /* Wait queue */
+                init_waitqueue_head(&uart16550_dev_COM2.write_q);
+                init_waitqueue_head(&uart16550_dev_COM2.read_q);
 
                 /* Register COM2 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM2, 1);
