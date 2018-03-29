@@ -6,6 +6,8 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
+#include <linux/kfifo.h>
+#include <linux/uaccess.h>
 #include "uart16550.h"
 #include "uart16550_hw.h"
 
@@ -56,6 +58,8 @@ static const struct file_operations uart16550_fops = {
  */
 struct uart16550_dev {
         struct cdev cdev;
+        DECLARE_KFIFO(write_buf, char, FIFO_SIZE);
+        DECLARE_KFIFO(read_buf, char, FIFO_SIZE);
 };
 
 static struct uart16550_dev uart16550_dev_COM1, uart16550_dev_COM2;
@@ -85,7 +89,12 @@ static int uart16550_setup_cdev(struct uart16550_dev *dev, int minor)
  */
 static int uart16550_open(struct inode *inode, struct file *filp)
 {
-        dprintk("open()\n");
+        /* identify device, store device information with private_data */
+        struct uart16550_dev *dev;
+        dev = container_of(inode->i_cdev, struct uart16550_dev, cdev);
+        filp->private_data = dev;
+
+        dprintk("open() device: COM%d\n", iminor(inode) + 1);
         return 0;
 }
 
@@ -98,15 +107,41 @@ static int uart16550_release(struct inode *inode, struct file *filp)
 static ssize_t uart16550_read(struct file *filp, char __user *user_buffer,
         size_t size, loff_t *offset)
 {
-        dprintk("read()\n");
-        return 0;
+        int bytes_copied = 0;
+        struct uart16550_dev *dev = filp->private_data;
+
+        /* Reject bad user address at first place */
+        if (!access_ok(VERIFY_WRITE, user_buffer, size))
+                return -EFAULT;
+
+        if (!kfifo_is_empty(&dev->write_buf)) {
+                if (kfifo_to_user(&dev->write_buf, user_buffer, size, &bytes_copied))
+                        return -EFAULT;
+        } else {
+                dprintk("nothing read\n");
+        }
+        dprintk("read() %d bytes\n", bytes_copied);
+        return bytes_copied;
 }
 
 static ssize_t uart16550_write(struct file *filp, const char __user *user_buffer,
         size_t size, loff_t *offset)
 {
-        dprintk("write()\n");
-        return size;
+        int bytes_copied;
+        struct uart16550_dev *dev = filp->private_data;
+
+        /* Reject bad user address at first place */
+        if (!access_ok(VERIFY_READ, user_buffer, size))
+                return -EFAULT;
+
+        if (!kfifo_is_full(&dev->write_buf)) {
+                if (kfifo_from_user(&dev->write_buf, user_buffer, size, &bytes_copied))
+                        return -EFAULT;
+        } else {
+                return -ENOBUFS;
+        }
+        dprintk("write() %d bytes\n", bytes_copied);
+        return bytes_copied;
 }
 
 /* TODO: unlocked_ioctl */
@@ -247,10 +282,14 @@ static int uart16550_init(void)
                         goto undo_hw_setup_COM1;
                 }
 
+                /* Init buffers of COM1 */
+                INIT_KFIFO(uart16550_dev_COM1.write_buf);
+                INIT_KFIFO(uart16550_dev_COM1.read_buf);
+
                 /* Register COM1 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM1, 0);
                 if (err)
-                        goto undo_dev_create_COM1;
+                        goto undo_dev_create_and_buf_init_COM1;
         }
         if (have_com2) {
                 /* Setup the hardware device for COM2 */
@@ -269,10 +308,14 @@ static int uart16550_init(void)
                         goto undo_hw_setup_COM2;
                 }
 
+                /* Init buffers of COM2 */
+                INIT_KFIFO(uart16550_dev_COM2.write_buf);
+                INIT_KFIFO(uart16550_dev_COM2.read_buf);
+
                 /* Register COM2 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM2, 1);
                 if (err)
-                        goto undo_dev_create_COM2;
+                        goto undo_dev_create_and_buf_init_COM2;
         }
 
         /*
@@ -284,18 +327,24 @@ static int uart16550_init(void)
          * Error handling
          * Undo things
          */
-undo_dev_create_COM2:
-        if (have_com2)
+undo_dev_create_and_buf_init_COM2:
+        if (have_com2) {
+                kfifo_free(&uart16550_dev_COM2.read_buf); 
+                kfifo_free(&uart16550_dev_COM2.write_buf); 
                 device_destroy(uart16550_class, MKDEV(major, 1));       
+        }
 undo_hw_setup_COM2:
         if (have_com2)
                 uart16550_hw_cleanup_device(COM2_BASEPORT);       
 undo_dev_reg_COM1:
         if (have_com1)
                 cdev_del(&uart16550_dev_COM1.cdev);
-undo_dev_create_COM1:
-        if (have_com1)
+undo_dev_create_and_buf_init_COM1:
+        if (have_com1) {
+                kfifo_free(&uart16550_dev_COM1.read_buf); 
+                kfifo_free(&uart16550_dev_COM1.write_buf); 
                 device_destroy(uart16550_class, MKDEV(major, 0));       
+        }
 undo_hw_setup_COM1:
         if (have_com1)
                 uart16550_hw_cleanup_device(COM1_BASEPORT);       
@@ -317,6 +366,9 @@ static void uart16550_cleanup(void)
         if (have_com1) {
                 /* Unregister COM1 from kernel */
                 cdev_del(&uart16550_dev_COM1.cdev);
+                /* Free buffers */
+                kfifo_free(&uart16550_dev_COM1.read_buf); 
+                kfifo_free(&uart16550_dev_COM1.write_buf); 
                 /* Reset the hardware device for COM1 */
                 uart16550_hw_cleanup_device(COM1_BASEPORT);
                 /* Remove the sysfs info for /dev/com1 */
@@ -325,6 +377,9 @@ static void uart16550_cleanup(void)
         if (have_com2) {
                 /* Unregister COM2 from kernel */
                 cdev_del(&uart16550_dev_COM2.cdev);
+                /* Free buffers */
+                kfifo_free(&uart16550_dev_COM2.read_buf); 
+                kfifo_free(&uart16550_dev_COM2.write_buf); 
                 /* Reset the hardware device for COM2 */
                 uart16550_hw_cleanup_device(COM2_BASEPORT);
                 /* Remove the sysfs info for /dev/com2 */
