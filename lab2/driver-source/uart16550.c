@@ -8,6 +8,7 @@
 #include <linux/cdev.h>
 #include <linux/kfifo.h>
 #include <linux/uaccess.h>
+#include <linux/interrupt.h>
 #include "uart16550.h"
 #include "uart16550_hw.h"
 
@@ -114,8 +115,8 @@ static ssize_t uart16550_read(struct file *filp, char __user *user_buffer,
         if (!access_ok(VERIFY_WRITE, user_buffer, size))
                 return -EFAULT;
 
-        if (!kfifo_is_empty(&dev->write_buf)) {
-                if (kfifo_to_user(&dev->write_buf, user_buffer, size, &bytes_copied))
+        if (!kfifo_is_empty(&dev->read_buf)) {
+                if (kfifo_to_user(&dev->read_buf, user_buffer, size, &bytes_copied))
                         return -EFAULT;
         } else {
                 dprintk("nothing read\n");
@@ -174,9 +175,17 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
          * TODO: Write the code that handles a hardware interrupt.
          * TODO: Populate device_port with the port of the correct device.
          */
+        struct uart16550_dev *dev = data;
+
+        if (irq_no == COM1_IRQ) {
+                device_port = COM1_BASEPORT;
+        } else {
+                device_port = COM2_BASEPORT;
+        }
 
         device_status = uart16550_hw_get_device_status(device_port);
 
+#ifdef INTERRRR
         while (uart16550_hw_device_can_send(device_status)) {
                 u8 byte_value;
                 /*
@@ -192,6 +201,7 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
                 uart16550_hw_write_to_device(device_port, byte_value);
                 device_status = uart16550_hw_get_device_status(device_port);
         }
+#endif
 
         while (uart16550_hw_device_has_data(device_status)) {
                 u8 byte_value;
@@ -200,6 +210,7 @@ irqreturn_t interrupt_handler(int irq_no, void *data)
                  * TODO: Store the read byte_value in the kernel device
                  *      incoming buffer.
                  */
+                kfifo_put(&dev->read_buf, byte_value);
                 device_status = uart16550_hw_get_device_status(device_port);
         }
 
@@ -266,20 +277,13 @@ static int uart16550_init(void)
         }
 
         if (have_com1) {
-                /* Setup the hardware device for COM1 */
-                err = uart16550_hw_setup_device(COM1_BASEPORT, THIS_MODULE->name);
-                if (err) {
-                        dprintk("Fail setting up hw device COM1\n");
-                        goto undo_sysfs_class_create; 
-                }
-
                 /* Create the sysfs info for /dev/com1 */
                 dev_ret = device_create(uart16550_class, NULL, MKDEV(major, 0),
                         NULL, "com1");
                 if (IS_ERR(dev_ret)) {
                         dprintk("Fail device_create COM1\n");
                         err = PTR_ERR(dev_ret);
-                        goto undo_hw_setup_COM1;
+                        goto undo_sysfs_class_create;
                 }
 
                 /* Init buffers of COM1 */
@@ -288,24 +292,34 @@ static int uart16550_init(void)
 
                 /* Register COM1 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM1, 0);
-                if (err)
-                        goto undo_dev_create_and_buf_init_COM1;
-        }
-        if (have_com2) {
-                /* Setup the hardware device for COM2 */
-                err = uart16550_hw_setup_device(COM2_BASEPORT, THIS_MODULE->name);
                 if (err) {
-                        dprintk("Fail setting up hw device COM2\n");
-                        goto undo_dev_reg_COM1; 
+                        dprintk("Fail registering COM1 to kernel");
+                        goto undo_dev_create_and_buf_init_COM1;
                 }
 
+                /* Register handler for IRQ4 */
+                err = request_irq(COM1_IRQ, interrupt_handler, IRQF_SHARED,
+                        THIS_MODULE->name, &uart16550_dev_COM1);
+                if (err) {
+                        dprintk("Fail registering IRQ4 handler\n");
+                        goto undo_dev_reg_COM1;
+                }
+
+                /* Setup the hardware device for COM1 */
+                err = uart16550_hw_setup_device(COM1_BASEPORT, THIS_MODULE->name);
+                if (err) {
+                        dprintk("Fail setting up hw device COM1\n");
+                        goto undo_handler_reg_COM1; 
+                }
+        }
+        if (have_com2) {
                 /* Create the sysfs info for /dev/com2 */
                 dev_ret = device_create(uart16550_class, NULL, MKDEV(major, 1),
                         NULL, "com2");
                 if (IS_ERR(dev_ret)) {
                         dprintk("Fail device_create COM2\n");
                         err = PTR_ERR(dev_ret);
-                        goto undo_hw_setup_COM2;
+                        goto undo_hw_setup_COM1;
                 }
 
                 /* Init buffers of COM2 */
@@ -314,8 +328,25 @@ static int uart16550_init(void)
 
                 /* Register COM2 to the kernel */ 
                 err = uart16550_setup_cdev(&uart16550_dev_COM2, 1);
-                if (err)
+                if (err) {
+                        dprintk("Fail registering COM2 to kernel");
                         goto undo_dev_create_and_buf_init_COM2;
+                }
+
+                /* Register handler for IRQ3 */
+                err = request_irq(COM2_IRQ, interrupt_handler, IRQF_SHARED,
+                        THIS_MODULE->name, &uart16550_dev_COM2);
+                if (err) {
+                        dprintk("Fail registering IRQ3 handler\n");
+                        goto undo_dev_reg_COM2;
+                }
+
+                /* Setup the hardware device for COM2 */
+                err = uart16550_hw_setup_device(COM2_BASEPORT, THIS_MODULE->name);
+                if (err) {
+                        dprintk("Fail setting up hw device COM2\n");
+                        goto undo_handler_reg_COM2; 
+                }
         }
 
         /*
@@ -327,15 +358,25 @@ static int uart16550_init(void)
          * Error handling
          * Undo things
          */
+undo_handler_reg_COM2:
+        if (have_com2)
+                free_irq(COM2_IRQ, &uart16550_dev_COM2);
+undo_dev_reg_COM2:
+        if (have_com2)
+                cdev_del(&uart16550_dev_COM2.cdev);
 undo_dev_create_and_buf_init_COM2:
         if (have_com2) {
                 kfifo_free(&uart16550_dev_COM2.read_buf); 
                 kfifo_free(&uart16550_dev_COM2.write_buf); 
                 device_destroy(uart16550_class, MKDEV(major, 1));       
         }
-undo_hw_setup_COM2:
-        if (have_com2)
-                uart16550_hw_cleanup_device(COM2_BASEPORT);       
+
+undo_hw_setup_COM1:
+        if (have_com1)
+                uart16550_hw_cleanup_device(COM1_BASEPORT);       
+undo_handler_reg_COM1:
+        if (have_com1)
+                free_irq(COM1_IRQ, &uart16550_dev_COM1);
 undo_dev_reg_COM1:
         if (have_com1)
                 cdev_del(&uart16550_dev_COM1.cdev);
@@ -345,9 +386,7 @@ undo_dev_create_and_buf_init_COM1:
                 kfifo_free(&uart16550_dev_COM1.write_buf); 
                 device_destroy(uart16550_class, MKDEV(major, 0));       
         }
-undo_hw_setup_COM1:
-        if (have_com1)
-                uart16550_hw_cleanup_device(COM1_BASEPORT);       
+
 undo_sysfs_class_create:
         class_destroy(uart16550_class);
 undo_reg_chrdev_region:      
@@ -364,24 +403,28 @@ static void uart16550_cleanup(void)
          *      module parameters.
          */
         if (have_com1) {
+                /* Reset the hardware device for COM1 */
+                uart16550_hw_cleanup_device(COM1_BASEPORT);
+                /* Unregister interrupt handler for IRQ4 */
+                free_irq(COM1_IRQ, &uart16550_dev_COM1);
                 /* Unregister COM1 from kernel */
                 cdev_del(&uart16550_dev_COM1.cdev);
                 /* Free buffers */
                 kfifo_free(&uart16550_dev_COM1.read_buf); 
                 kfifo_free(&uart16550_dev_COM1.write_buf); 
-                /* Reset the hardware device for COM1 */
-                uart16550_hw_cleanup_device(COM1_BASEPORT);
                 /* Remove the sysfs info for /dev/com1 */
                 device_destroy(uart16550_class, MKDEV(major, 0));
         }
         if (have_com2) {
+                /* Reset the hardware device for COM2 */
+                uart16550_hw_cleanup_device(COM2_BASEPORT);
+                /* Unregister interrupt handler for IRQ3 */
+                free_irq(COM2_IRQ, &uart16550_dev_COM2);
                 /* Unregister COM2 from kernel */
                 cdev_del(&uart16550_dev_COM2.cdev);
                 /* Free buffers */
                 kfifo_free(&uart16550_dev_COM2.read_buf); 
                 kfifo_free(&uart16550_dev_COM2.write_buf); 
-                /* Reset the hardware device for COM2 */
-                uart16550_hw_cleanup_device(COM2_BASEPORT);
                 /* Remove the sysfs info for /dev/com2 */
                 device_destroy(uart16550_class, MKDEV(major, 1));
         }
