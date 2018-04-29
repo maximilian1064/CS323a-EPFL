@@ -1,41 +1,65 @@
+diff --git a/.config b/.config
+index 4c1b95b..355cef0 100644
+--- a/.config
++++ b/.config
+@@ -37,7 +37,7 @@ CONFIG_ZONE_DMA32=y
+ CONFIG_AUDIT_ARCH=y
+ CONFIG_ARCH_SUPPORTS_OPTIMIZED_INLINING=y
+ CONFIG_ARCH_SUPPORTS_DEBUG_PAGEALLOC=y
+-CONFIG_X86_64_SMP=y
++# CONFIG_X86_64_SMP is not set
+ CONFIG_ARCH_SUPPORTS_UPROBES=y
+ CONFIG_FIX_EARLYCON_MEM=y
+ CONFIG_PGTABLE_LEVELS=4
+@@ -381,7 +381,7 @@ CONFIG_QUEUED_RWLOCKS=y
+ # Processor type and features
+ #
+ CONFIG_ZONE_DMA=y
+-CONFIG_SMP=y
++# CONFIG_SMP is not set
+ CONFIG_X86_FEATURE_NAMES=y
+ CONFIG_X86_FAST_FEATURE_TESTS=y
+ CONFIG_X86_MPPARSE=y
 diff --git a/include/linux/init_task.h b/include/linux/init_task.h
-index 325f649..f68ceb4 100644
+index 6a53262..20f538d 100644
 --- a/include/linux/init_task.h
 +++ b/include/linux/init_task.h
-@@ -247,6 +247,9 @@ extern struct task_group root_task_group;
+@@ -247,6 +247,10 @@ extern struct cred init_cred;
  		.run_list	= LIST_HEAD_INIT(tsk.rt.run_list),	\
  		.time_slice	= RR_TIMESLICE,				\
  	},								\
 +	.dummy_se = {							\
 +		.run_list 	= LIST_HEAD_INIT(tsk.dummy_se.run_list),\
++		.time_slice 	= 0,					\
 +	},								\
  	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
  	INIT_PUSHABLE_TASKS(tsk)					\
  	INIT_CGROUP_SCHED(tsk)						\
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 75d9a57..8b82e10 100644
+index d258826..946ea86 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -429,6 +429,10 @@ struct sched_rt_entity {
+@@ -429,6 +429,11 @@ struct sched_rt_entity {
  #endif
  } __randomize_layout;
  
 +struct sched_dummy_entity {
 +	struct list_head run_list;
++	unsigned int time_slice;
 +};
 +
  struct sched_dl_entity {
  	struct rb_node			rb_node;
  
-@@ -563,6 +563,7 @@ struct task_struct {
-	const struct sched_class	*sched_class;
-	struct sched_entity		se;
-	struct sched_rt_entity		rt;
+@@ -563,6 +568,7 @@ struct task_struct {
+ 	const struct sched_class	*sched_class;
+ 	struct sched_entity		se;
+ 	struct sched_rt_entity		rt;
 +	struct sched_dummy_entity dummy_se;
  #ifdef CONFIG_CGROUP_SCHED
-	struct task_group		*sched_task_group;
+ 	struct task_group		*sched_task_group;
  #endif
-@@ -1105,6 +1105,21 @@ static inline bool should_numa_migrate_memory(struct task_struct *p,
+@@ -1105,6 +1111,21 @@ struct task_struct {
  	 */
  };
  
@@ -58,7 +82,7 @@ index 75d9a57..8b82e10 100644
  {
  	return task->pids[PIDTYPE_PID].pid;
 diff --git a/include/linux/sched/sysctl.h b/include/linux/sched/sysctl.h
-index 22db1e6..38dafe7 100644
+index 1c1a151..5ca6c3e 100644
 --- a/include/linux/sched/sysctl.h
 +++ b/include/linux/sched/sysctl.h
 @@ -24,6 +24,9 @@ extern unsigned int sysctl_sched_min_granularity;
@@ -72,7 +96,7 @@ index 22db1e6..38dafe7 100644
  	SCHED_TUNABLESCALING_NONE,
  	SCHED_TUNABLESCALING_LOG,
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
-index 5e59b83..c8e862d 100644
+index e2f9d4f..5a07b64 100644
 --- a/kernel/sched/Makefile
 +++ b/kernel/sched/Makefile
 @@ -17,7 +17,7 @@ CFLAGS_core.o := $(PROFILING) -fno-omit-frame-pointer
@@ -85,7 +109,7 @@ index 5e59b83..c8e862d 100644
  obj-$(CONFIG_SMP) += cpupri.o cpudeadline.o topology.o stop_task.o
  obj-$(CONFIG_SCHED_AUTOGROUP) += autogroup.o
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index 154fd68..4a6690b 100644
+index a7bf32a..ed71cab 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -2382,7 +2382,10 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
@@ -100,7 +124,7 @@ index 154fd68..4a6690b 100644
  	}
  
  	init_entity_runnable_average(&p->se);
-@@ -3754,7 +3754,11 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
+@@ -3754,7 +3757,11 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
  			p->dl.dl_boosted = 0;
  		if (rt_prio(oldprio))
  			p->rt.timeout = 0;
@@ -113,7 +137,7 @@ index 154fd68..4a6690b 100644
  	}
  
  	p->prio = prio;
-@@ -3819,6 +3819,11 @@ void set_user_nice(struct task_struct *p, long nice)
+@@ -3819,6 +3826,11 @@ void set_user_nice(struct task_struct *p, long nice)
  	p->prio = effective_prio(p);
  	delta = p->prio - old_prio;
  
@@ -125,10 +149,10 @@ index 154fd68..4a6690b 100644
  	if (queued) {
  		enqueue_task(rq, p, ENQUEUE_RESTORE | ENQUEUE_NOCLOCK);
  		/*
-@@ -3993,7 +3993,12 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
-	else if (rt_prio(p->prio))
-		p->sched_class = &rt_sched_class;
-	else
+@@ -3993,7 +4005,12 @@ static void __setscheduler(struct rq *rq, struct task_struct *p,
+ 	else if (rt_prio(p->prio))
+ 		p->sched_class = &rt_sched_class;
+ 	else
 -		p->sched_class = &fair_sched_class;
 +	{
 +		if (dummy_prio(p->prio))
@@ -139,7 +163,7 @@ index 154fd68..4a6690b 100644
  }
  
  /*
-@@ -5895,6 +5895,7 @@ void __init sched_init(void)
+@@ -5895,6 +5912,7 @@ void __init sched_init(void)
  		init_cfs_rq(&rq->cfs);
  		init_rt_rq(&rq->rt);
  		init_dl_rq(&rq->dl);
@@ -149,10 +173,10 @@ index 154fd68..4a6690b 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..90949c1
+index 0000000..62fce6c
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,183 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -257,6 +281,18 @@ index 0000000..90949c1
 +
 +static void task_tick_dummy(struct rq *rq, struct task_struct *curr, int queued)
 +{
++	struct sched_dummy_entity *dummy_se = &curr->dummy_se;
++	struct list_head *queue = &rq->dummy.queue;
++
++	if(++(dummy_se->time_slice) < DUMMY_TIMESLICE)
++		return;
++	/* Time slice expired */
++	dummy_se->time_slice = 0;
++
++	list_del_init(&dummy_se->run_list);
++	list_add_tail(&dummy_se->run_list, queue);
++
++	resched_curr(rq);
 +}
 +
 +static void switched_from_dummy(struct rq *rq, struct task_struct *p)
@@ -325,7 +361,7 @@ index 0000000..90949c1
 +	.update_curr		= update_curr_dummy,
 +};
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
-index c242944..448cd36 100644
+index 26a71eb..41fdad5 100644
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
 @@ -4250,6 +4250,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
@@ -336,17 +372,17 @@ index c242944..448cd36 100644
  
  	/*
  	 * Avoid running the skip buddy, if running something else can
-@@ -6626,7 +6626,8 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
+@@ -6625,7 +6626,8 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
+ 
  again:
  	if (!cfs_rq->nr_running)
 -		goto idle;
 +		return NULL;
 +		//goto idle;
-
+ 
  #ifdef CONFIG_FAIR_GROUP_SCHED
-	if (prev->sched_class != &fair_sched_class)
-		goto simple;
-@@ -9893,7 +9893,7 @@ static unsigned int get_rr_interval_fair(struct rq *rq, struct task_struct *task
+ 	if (prev->sched_class != &fair_sched_class)
+@@ -9893,7 +9895,7 @@ static unsigned int get_rr_interval_fair(struct rq *rq, struct task_struct *task
   * All the scheduling class methods:
   */
  const struct sched_class fair_sched_class = {
@@ -356,11 +392,11 @@ index c242944..448cd36 100644
  	.dequeue_task		= dequeue_task_fair,
  	.yield_task		= yield_task_fair,
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
-index 055f935..59645c5 100644
+index 74b5727..08f1973 100644
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h
 @@ -602,6 +602,10 @@ struct dl_rq {
-	u64 bw_ratio;
+ 	u64 bw_ratio;
  };
  
 + struct dummy_rq {
@@ -368,9 +404,9 @@ index 055f935..59645c5 100644
 + };
 +
  #ifdef CONFIG_SMP
-
+ 
  static inline bool sched_asym_prefer(int a, int b)
-@@ -712,6 +712,7 @@ struct rq {
+@@ -712,6 +716,7 @@ struct rq {
  	struct cfs_rq cfs;
  	struct rt_rq rt;
  	struct dl_rq dl;
@@ -378,7 +414,7 @@ index 055f935..59645c5 100644
  
  #ifdef CONFIG_FAIR_GROUP_SCHED
  	/* list of leaf cfs_rq on this cpu: */
-@@ -1518,6 +1518,7 @@ extern const struct sched_class stop_sched_class;
+@@ -1518,6 +1523,7 @@ extern const struct sched_class stop_sched_class;
  extern const struct sched_class dl_sched_class;
  extern const struct sched_class rt_sched_class;
  extern const struct sched_class fair_sched_class;
@@ -386,7 +422,7 @@ index 055f935..59645c5 100644
  extern const struct sched_class idle_sched_class;
  
  
-@@ -2008,6 +2008,7 @@ print_numa_stats(struct seq_file *m, int node, unsigned long tsf,
+@@ -2008,6 +2014,7 @@ print_numa_stats(struct seq_file *m, int node, unsigned long tsf,
  extern void init_cfs_rq(struct cfs_rq *cfs_rq);
  extern void init_rt_rq(struct rt_rq *rt_rq);
  extern void init_dl_rq(struct dl_rq *dl_rq);
@@ -395,7 +431,7 @@ index 055f935..59645c5 100644
  extern void cfs_bandwidth_usage_inc(void);
  extern void cfs_bandwidth_usage_dec(void);
 diff --git a/kernel/sysctl.c b/kernel/sysctl.c
-index e6cb2b4..7d79ec2 100644
+index 557d467..6b212c7 100644
 --- a/kernel/sysctl.c
 +++ b/kernel/sysctl.c
 @@ -338,6 +338,20 @@ static struct ctl_table kern_table[] = {
