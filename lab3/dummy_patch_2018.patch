@@ -327,10 +327,10 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..9774e50
+index 0000000..22dfebd
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,195 @@
+@@ -0,0 +1,244 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -417,6 +417,10 @@ index 0000000..9774e50
 +
 +static void check_preempt_curr_dummy(struct rq *rq, struct task_struct *p, int flags)
 +{
++	if(p->prio < rq->curr->prio) {
++		resched_curr(rq);
++		return;
++	}
 +}
 +
 +static struct task_struct *pick_next_task_dummy(struct rq *rq, struct task_struct* prev, struct rq_flags *rf)
@@ -465,12 +469,57 @@ index 0000000..9774e50
 +{
 +}
 +
++/*
++ * Make rescheduling decisions once sched class is changed
++ * Not called by set_user_nice()
++ * 
++ * A little bit duplicated with prio_changed, but this is due
++ * to the function check_class_changed() which will ignore
++ * prio_changed if sched class is changed
++ */
 +static void switched_to_dummy(struct rq *rq, struct task_struct *p)
 +{
++	// if task is not runnable, don't bother to reschedule
++	if(!task_on_rq_queued(p))
++		return;
++	
++	/*
++	 * Reschedule if
++	 * 1. Task is running (We always move from higher priority sched classes to dummy)
++	 * 2. Task is ready and priority is increased to be larger than current task
++	 */
++	if(rq->curr == p) {
++		resched_curr(rq);
++	} else {
++		if(p->prio < rq->curr->prio)
++			resched_curr(rq);
++	}
 +}
 +
++/*
++ * Make rescheduling decisions once priority changed
++ * Not called if sched class is also changed
++ * Not called by set_user_nice()
++ */
 +static void prio_changed_dummy(struct rq*rq, struct task_struct *p, int oldprio)
 +{
++	// Set time
++	// if task is not runnable, don't bother to reschedule
++	if(!task_on_rq_queued(p))
++		return;
++	
++	/*
++	 * Reschedule if
++	 * 1. Task is running and priority is lowered
++	 * 2. Task is ready and priority is increased to be larger than current task
++	 */
++	if(rq->curr == p) {
++		if(p->prio > oldprio)
++			resched_curr(rq);
++	} else {
++		if(p->prio < rq->curr->prio)
++			resched_curr(rq);
++	}
 +}
 +
 +static unsigned int get_rr_interval_dummy(struct rq* rq, struct task_struct *p)
