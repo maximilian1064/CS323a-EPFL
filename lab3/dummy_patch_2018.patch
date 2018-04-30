@@ -189,7 +189,7 @@ index 6a53262..20f538d 100644
  	INIT_PUSHABLE_TASKS(tsk)					\
  	INIT_CGROUP_SCHED(tsk)						\
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index d258826..946ea86 100644
+index d258826..65b6fe9 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -429,6 +429,11 @@ struct sched_rt_entity {
@@ -212,12 +212,13 @@ index d258826..946ea86 100644
  #ifdef CONFIG_CGROUP_SCHED
  	struct task_group		*sched_task_group;
  #endif
-@@ -1105,6 +1111,21 @@ struct task_struct {
+@@ -1105,6 +1111,22 @@ struct task_struct {
  	 */
  };
  
 +#define MIN_DUMMY_PRIO 131
 +#define MAX_DUMMY_PRIO 135
++#define NUM_DUMMY_PRIO 5
 +
 +static inline int dummy_prio(int prio)
 +{
@@ -326,10 +327,10 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..ad3dbe6
+index 0000000..9774e50
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,195 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -362,7 +363,9 @@ index 0000000..ad3dbe6
 +
 +void init_dummy_rq(struct dummy_rq *dummy_rq)
 +{
-+	INIT_LIST_HEAD(&dummy_rq->queue);
++	size_t i;
++	for(i = 0; i < NUM_DUMMY_PRIO; i++)
++		INIT_LIST_HEAD(&dummy_rq->queue[i]);
 +}
 +
 +/*
@@ -374,10 +377,15 @@ index 0000000..ad3dbe6
 +	return container_of(dummy_se, struct task_struct, dummy_se);
 +}
 +
++static inline size_t dummy_prio_level(struct task_struct *p)
++{
++	return p->prio - MIN_DUMMY_PRIO;
++}
++
 +static inline void _enqueue_task_dummy(struct rq *rq, struct task_struct *p)
 +{
 +	struct sched_dummy_entity *dummy_se = &p->dummy_se;
-+	struct list_head *queue = &rq->dummy.queue;
++	struct list_head *queue = &rq->dummy.queue[dummy_prio_level(p)];
 +	list_add_tail(&dummy_se->run_list, queue);
 +}
 +
@@ -413,15 +421,20 @@ index 0000000..ad3dbe6
 +
 +static struct task_struct *pick_next_task_dummy(struct rq *rq, struct task_struct* prev, struct rq_flags *rf)
 +{
-+	struct dummy_rq *dummy_rq = &rq->dummy;
 +	struct sched_dummy_entity *next;
-+	if(!list_empty(&dummy_rq->queue)) {
-+		next = list_first_entry(&dummy_rq->queue, struct sched_dummy_entity, run_list);
-+                put_prev_task(rq, prev);
-+		return dummy_task_of(next);
-+	} else {
-+		return NULL;
++	size_t i;
++	struct list_head *queue;
++
++	for(i = 0; i < NUM_DUMMY_PRIO; i++) {
++		queue = &rq->dummy.queue[i];
++		if(!list_empty(queue)) {
++			next = list_first_entry(queue, struct sched_dummy_entity, run_list);
++                	put_prev_task(rq, prev);
++			return dummy_task_of(next);
++		}
 +	}
++
++	return NULL;
 +}
 +
 +static void put_prev_task_dummy(struct rq *rq, struct task_struct *prev)
@@ -435,7 +448,7 @@ index 0000000..ad3dbe6
 +static void task_tick_dummy(struct rq *rq, struct task_struct *curr, int queued)
 +{
 +	struct sched_dummy_entity *dummy_se = &curr->dummy_se;
-+	struct list_head *queue = &rq->dummy.queue;
++	struct list_head *queue = &rq->dummy.queue[dummy_prio_level(curr)];
 +
 +	if(++(dummy_se->time_slice) < get_timeslice())
 +		return;
@@ -545,7 +558,7 @@ index 26a71eb..41fdad5 100644
  	.dequeue_task		= dequeue_task_fair,
  	.yield_task		= yield_task_fair,
 diff --git a/kernel/sched/sched.h b/kernel/sched/sched.h
-index 74b5727..08f1973 100644
+index 74b5727..1a5a99d 100644
 --- a/kernel/sched/sched.h
 +++ b/kernel/sched/sched.h
 @@ -602,6 +602,10 @@ struct dl_rq {
@@ -553,7 +566,7 @@ index 74b5727..08f1973 100644
  };
  
 + struct dummy_rq {
-+  	struct list_head queue;
++  	struct list_head queue[NUM_DUMMY_PRIO];
 + };
 +
  #ifdef CONFIG_SMP
