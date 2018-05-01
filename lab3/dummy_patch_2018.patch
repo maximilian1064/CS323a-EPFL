@@ -174,37 +174,41 @@ index 4c1b95b..3cd04eb 100644
  CONFIG_GLOB=y
  # CONFIG_GLOB_SELFTEST is not set
 diff --git a/include/linux/init_task.h b/include/linux/init_task.h
-index 6a53262..20f538d 100644
+index 6a53262..6baefc6 100644
 --- a/include/linux/init_task.h
 +++ b/include/linux/init_task.h
-@@ -247,6 +247,10 @@ extern struct cred init_cred;
+@@ -247,6 +247,12 @@ extern struct cred init_cred;
  		.run_list	= LIST_HEAD_INIT(tsk.rt.run_list),	\
  		.time_slice	= RR_TIMESLICE,				\
  	},								\
 +	.dummy_se = {							\
 +		.run_list 	= LIST_HEAD_INIT(tsk.dummy_se.run_list),\
 +		.time_slice 	= 0,					\
++		.prio_boost	= 0,					\
++		.waiting_time	= 0,					\
 +	},								\
  	.tasks		= LIST_HEAD_INIT(tsk.tasks),			\
  	INIT_PUSHABLE_TASKS(tsk)					\
  	INIT_CGROUP_SCHED(tsk)						\
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index d258826..65b6fe9 100644
+index d258826..1e686b7 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -429,6 +429,11 @@ struct sched_rt_entity {
+@@ -429,6 +429,13 @@ struct sched_rt_entity {
  #endif
  } __randomize_layout;
  
 +struct sched_dummy_entity {
 +	struct list_head run_list;
 +	unsigned int time_slice;
++	int prio_boost;
++	unsigned int waiting_time;
 +};
 +
  struct sched_dl_entity {
  	struct rb_node			rb_node;
  
-@@ -563,6 +568,7 @@ struct task_struct {
+@@ -563,6 +570,7 @@ struct task_struct {
  	const struct sched_class	*sched_class;
  	struct sched_entity		se;
  	struct sched_rt_entity		rt;
@@ -212,7 +216,7 @@ index d258826..65b6fe9 100644
  #ifdef CONFIG_CGROUP_SCHED
  	struct task_group		*sched_task_group;
  #endif
-@@ -1105,6 +1111,22 @@ struct task_struct {
+@@ -1105,6 +1113,22 @@ struct task_struct {
  	 */
  };
  
@@ -327,10 +331,10 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..8f20af1
+index 0000000..b778251
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,311 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -395,14 +399,56 @@ index 0000000..8f20af1
 +	list_del_init(&dummy_se->run_list);
 +}
 +
++static inline void update_aging_info_dummy(struct rq *rq)
++{
++	size_t i;
++	for(i = dummy_prio_level(rq->curr->prio) + 1; i < NUM_DUMMY_PRIO; i++) {
++		struct list_head *curr_queue = &rq->dummy.queue[i];
++		size_t j = i - 1;
++		struct list_head *upper_queue = &rq->dummy.queue[j];
++		struct sched_dummy_entity *dummy_se;
++
++		list_for_each_entry(dummy_se, curr_queue, run_list) {
++			if(++(dummy_se->waiting_time) >= get_age_threshold()) {
++				dummy_se->waiting_time = 0;
++				dummy_se->prio_boost++;
++				dummy_task_of(dummy_se)->prio--;
++				list_del_init(&dummy_se->run_list);
++				list_add_tail(&dummy_se->run_list, upper_queue);
++			}
++		}
++	}
++}
++
 +/*
 + * Scheduling class functions to implement
 + */
 +
++/*
++ * Note: 
++ * This is function is not called during timer-based preemption
++ * and priority aging.
++ * 
++ * It is called when
++ * 1. New task is created
++ * 	The routine sched_fork() will set child->prio = parent->normal_prio,
++ * 	no need to worry that parent will pass boosted priority to child
++ * 2. Task is woken up
++ * 	All tasks' prio is reverted to initial value before going to sleep,
++ * 	so it's safe to reset prio_boost when task wakes up.
++ * 3. Task priority changed by kernel(Not including aging within dummy scheduler)
++ * 4. Task priority changed by user(Through set_user_nice())
++ */
 +static void enqueue_task_dummy(struct rq *rq, struct task_struct *p, int flags)
 +{
 +	// reset timeslice
 +	p->dummy_se.time_slice = 0;
++
++	// reset prio_boost
++	p->dummy_se.prio_boost = 0;
++
++	// reset waiting_time
++	p->dummy_se.waiting_time = 0;
 +
 +	_enqueue_task_dummy(rq, p);
 +	add_nr_running(rq,1);
@@ -410,6 +456,10 @@ index 0000000..8f20af1
 +
 +static void dequeue_task_dummy(struct rq *rq, struct task_struct *p, int flags)
 +{
++	// reset p->prio to initial value if the task is going to sleep
++	if(flags & DEQUEUE_SLEEP)
++		p->prio = p->prio + p->dummy_se.prio_boost;
++
 +	_dequeue_task_dummy(p);
 +	sub_nr_running(rq,1);
 +}
@@ -455,16 +505,32 @@ index 0000000..8f20af1
 +static void task_tick_dummy(struct rq *rq, struct task_struct *curr, int queued)
 +{
 +	struct sched_dummy_entity *dummy_se = &curr->dummy_se;
-+	struct list_head *queue = &rq->dummy.queue[dummy_prio_level(curr)];
 +
++	// update aging info of queued tasks
++	update_aging_info_dummy();
++
++	/* Return if time slice is not expired */
 +	if(++(dummy_se->time_slice) < get_timeslice())
 +		return;
-+	/* Time slice expired */
++
 +	dummy_se->time_slice = 0;
-+
++	// rm curr task from runqueue
 +	list_del_init(&dummy_se->run_list);
-+	list_add_tail(&dummy_se->run_list, queue);
 +
++	/*
++	 * restore the priority of curr tasks to initial value if it's boosted
++	 * 
++	 * allow tasks to maintain its boosted priority for one time slice after getting
++	 * the CPU
++	 */
++	if(dummy_se->prio_boost > 0) {
++		curr->prio = curr->prio + dummy_se->prio_boost;
++		dummy_se->prio_boost = 0;
++		dummy_se->waiting_time = 0;
++	}
++
++	// put curr task back to the tail of its dummy runqueue
++	list_add_tail(&dummy_se->run_list, &rq->dummy.queue[dummy_prio_level(curr)]);
 +	resched_curr(rq);
 +}
 +
@@ -474,6 +540,7 @@ index 0000000..8f20af1
 +
 +/*
 + * Make rescheduling decisions once sched class is changed
++ * 
 + * Not called by set_user_nice()
 + * 
 + * A little bit duplicated with prio_changed, but this is due
@@ -501,12 +568,13 @@ index 0000000..8f20af1
 +
 +/*
 + * Make rescheduling decisions once priority changed
++ * 
 + * Not called if sched class is also changed
++ * 
 + * Not called by set_user_nice()
 + */
 +static void prio_changed_dummy(struct rq*rq, struct task_struct *p, int oldprio)
 +{
-+	// Set time
 +	// if task is not runnable, don't bother to reschedule
 +	if(!task_on_rq_queued(p))
 +		return;
