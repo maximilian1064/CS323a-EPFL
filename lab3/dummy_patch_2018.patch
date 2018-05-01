@@ -327,10 +327,10 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..22dfebd
+index 0000000..8f20af1
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,244 @@
+@@ -0,0 +1,247 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -401,6 +401,9 @@ index 0000000..22dfebd
 +
 +static void enqueue_task_dummy(struct rq *rq, struct task_struct *p, int flags)
 +{
++	// reset timeslice
++	p->dummy_se.time_slice = 0;
++
 +	_enqueue_task_dummy(rq, p);
 +	add_nr_running(rq,1);
 +}
