@@ -331,15 +331,29 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..b778251
+index 0000000..f8ec84b
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,311 @@
+@@ -0,0 +1,357 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
 +
 +#include "sched.h"
++
++/*
++ * printks
++ */
++// #define DUMMY_ENABLE_AGING
++// #define DUMMY_DEBUG
++#ifdef DUMMY_DEBUG
++	#include <linux/printk.h>
++	#define dprintk(fmt, ...)	printk_deferred(KERN_WARNING "%s:%d " fmt, \
++					__FILE__, __LINE__, ##__VA_ARGS__)
++#else
++	#define dprintk(fmt, ...)	do { } while (0)
++#endif
++
 +
 +/*
 + * Timeslice and age threshold are repsented in jiffies. Default timeslice
@@ -381,6 +395,9 @@ index 0000000..b778251
 +	return container_of(dummy_se, struct task_struct, dummy_se);
 +}
 +
++/*
++ * Return dummy priority level [1-5], i.e., index to the dummy runqueues
++ */
 +static inline size_t dummy_prio_level(struct task_struct *p)
 +{
 +	return p->prio - MIN_DUMMY_PRIO;
@@ -391,30 +408,40 @@ index 0000000..b778251
 +	struct sched_dummy_entity *dummy_se = &p->dummy_se;
 +	struct list_head *queue = &rq->dummy.queue[dummy_prio_level(p)];
 +	list_add_tail(&dummy_se->run_list, queue);
++	dprintk("enqueue ENQUEUE: PID=%d, prio=%d\n", p->pid, p->prio);
 +}
 +
 +static inline void _dequeue_task_dummy(struct task_struct *p)
 +{
 +	struct sched_dummy_entity *dummy_se = &p->dummy_se;
 +	list_del_init(&dummy_se->run_list);
++	dprintk("dequeue DEQUEUE: PID=%d, prio=%d\n", p->pid, p->prio);
 +}
 +
++/*
++ * Check and update the aging info of queued tasks,
++ * increase priority if age_threshold reached
++ */
 +static inline void update_aging_info_dummy(struct rq *rq)
 +{
 +	size_t i;
-+	for(i = dummy_prio_level(rq->curr->prio) + 1; i < NUM_DUMMY_PRIO; i++) {
++	// checking all the queued tasks with priority < priority of current running task
++	for(i = dummy_prio_level(rq->curr) + 1; i < NUM_DUMMY_PRIO; i++) {
 +		struct list_head *curr_queue = &rq->dummy.queue[i];
-+		size_t j = i - 1;
-+		struct list_head *upper_queue = &rq->dummy.queue[j];
 +		struct sched_dummy_entity *dummy_se;
 +
 +		list_for_each_entry(dummy_se, curr_queue, run_list) {
++			// Update aging info if age threshold reached
 +			if(++(dummy_se->waiting_time) >= get_age_threshold()) {
++				struct task_struct *p = dummy_task_of(dummy_se);
 +				dummy_se->waiting_time = 0;
 +				dummy_se->prio_boost++;
-+				dummy_task_of(dummy_se)->prio--;
++				p->prio--;
 +				list_del_init(&dummy_se->run_list);
-+				list_add_tail(&dummy_se->run_list, upper_queue);
++				dprintk("aging DEQUEUE: PID=%d, prio=%d\n", p->pid, p->prio);
++				list_add_tail(&dummy_se->run_list, 
++					&rq->dummy.queue[dummy_prio_level(p)]);
++				dprintk("aging ENQUEUE: PID=%d, prio=%d\n", p->pid, p->prio);
 +			}
 +		}
 +	}
@@ -464,10 +491,19 @@ index 0000000..b778251
 +	sub_nr_running(rq,1);
 +}
 +
++/*
++ * Simply putting to end of the dummy runqueue it belongs to
++ */
 +static void yield_task_dummy(struct rq *rq)
 +{
++	struct sched_dummy_entity *dummy_se = &rq->curr->dummy_se;
++	list_del_init(&dummy_se->run_list);
++	list_add_tail(&dummy_se->run_list, &rq->dummy.queue[dummy_prio_level(rq->curr)]);
 +}
 +
++/*
++ * Signal rescheduling if priority is larger than the current running task
++ */
 +static void check_preempt_curr_dummy(struct rq *rq, struct task_struct *p, int flags)
 +{
 +	if(p->prio < rq->curr->prio) {
@@ -476,6 +512,9 @@ index 0000000..b778251
 +	}
 +}
 +
++/*
++ * Simply picking the head of the dummy runqueue with highest priority
++ */
 +static struct task_struct *pick_next_task_dummy(struct rq *rq, struct task_struct* prev, struct rq_flags *rf)
 +{
 +	struct sched_dummy_entity *next;
@@ -502,20 +541,26 @@ index 0000000..b778251
 +{
 +}
 +
++/*
++ * Handling aging and timer_based preemption
++ */
 +static void task_tick_dummy(struct rq *rq, struct task_struct *curr, int queued)
 +{
 +	struct sched_dummy_entity *dummy_se = &curr->dummy_se;
 +
-+	// update aging info of queued tasks
-+	update_aging_info_dummy();
++	// update aging info of queued tasks, disabled due to bugs, see README for details
++#ifdef DUMMY_ENABLE_AGING
++	update_aging_info_dummy(rq);
++#endif
 +
-+	/* Return if time slice is not expired */
++	// Return if time slice is not expired
 +	if(++(dummy_se->time_slice) < get_timeslice())
 +		return;
 +
 +	dummy_se->time_slice = 0;
 +	// rm curr task from runqueue
 +	list_del_init(&dummy_se->run_list);
++	dprintk("task_tick DEQUEUE: PID=%d, prio=%d\n", curr->pid, curr->prio);
 +
 +	/*
 +	 * restore the priority of curr tasks to initial value if it's boosted
@@ -531,6 +576,7 @@ index 0000000..b778251
 +
 +	// put curr task back to the tail of its dummy runqueue
 +	list_add_tail(&dummy_se->run_list, &rq->dummy.queue[dummy_prio_level(curr)]);
++	dprintk("task_tick ENQUEUE: PID=%d, prio=%d\n", curr->pid, curr->prio);
 +	resched_curr(rq);
 +}
 +
