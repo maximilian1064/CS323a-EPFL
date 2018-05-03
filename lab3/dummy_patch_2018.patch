@@ -331,10 +331,10 @@ index a7bf32a..ed71cab 100644
  		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 diff --git a/kernel/sched/dummy.c b/kernel/sched/dummy.c
 new file mode 100644
-index 0000000..f8ec84b
+index 0000000..f66dc48
 --- /dev/null
 +++ b/kernel/sched/dummy.c
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,358 @@
 +/*
 + * Dummy scheduling class, mapped to range a of 5 levels of SCHED_NORMAL policy
 + */
@@ -344,7 +344,7 @@ index 0000000..f8ec84b
 +/*
 + * printks
 + */
-+// #define DUMMY_ENABLE_AGING
++#define DUMMY_ENABLE_AGING
 +// #define DUMMY_DEBUG
 +#ifdef DUMMY_DEBUG
 +	#include <linux/printk.h>
@@ -429,8 +429,9 @@ index 0000000..f8ec84b
 +	for(i = dummy_prio_level(rq->curr) + 1; i < NUM_DUMMY_PRIO; i++) {
 +		struct list_head *curr_queue = &rq->dummy.queue[i];
 +		struct sched_dummy_entity *dummy_se;
++		struct sched_dummy_entity *dummy_se_temp;
 +
-+		list_for_each_entry(dummy_se, curr_queue, run_list) {
++		list_for_each_entry_safe(dummy_se, dummy_se_temp, curr_queue, run_list) {
 +			// Update aging info if age threshold reached
 +			if(++(dummy_se->waiting_time) >= get_age_threshold()) {
 +				struct task_struct *p = dummy_task_of(dummy_se);
@@ -548,7 +549,7 @@ index 0000000..f8ec84b
 +{
 +	struct sched_dummy_entity *dummy_se = &curr->dummy_se;
 +
-+	// update aging info of queued tasks, disabled due to bugs, see README for details
++	// update aging info of queued tasks
 +#ifdef DUMMY_ENABLE_AGING
 +	update_aging_info_dummy(rq);
 +#endif

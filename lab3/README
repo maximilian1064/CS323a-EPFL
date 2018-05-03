@@ -3,16 +3,23 @@ Dummy Scheduler -- Lei Yan
 1. RR with timer-based preemption (In task_tick_dummy())
 
 For this functionality I simply add a .time_slice field to the dummy_se.  The time_slice
-will increment in each call to task_tick_dummy. When the time_slice reaches
-DUMMY_TIMESLICE, the current task will be put to the tail of the queue, and resched_curr
-will be called to do rescheduling
+will increment in each call to task_tick_dummy(). When the time_slice reaches
+DUMMY_TIMESLICE, the current task will be put to the tail of the queue, and resched_curr()
+will be called to signal rescheduling
 
 The time_slice will be reset to zero when 
     (1) it exceeds DUMMY_TIMESLICE 
-    (2) priority of the task changed (not due to aging)
+    (2) priority of the task changed (not by aging)
     (3) task wakes up
     (4) task is created and enqueued for the first time
     (5) task's boosted priority is restored (aging)
+
+The time_slice will be maintained when a task is preempted by tasks with higher
+priority. This ensures the scheduler is fair to tasks with same priority. Consider
+an example with two runnable tasks A,B of same priority, and several sleeping tasks with
+higher priority. If A runs first, and it get preempted multiple times by the sleeping
+tasks during its time_slice, then if time_slice is reset when task get preempted, A will
+get much more time to run than its time_slice, which is unfair to B.
 
 
 2. Yield (In yield_task_dummy())
@@ -26,15 +33,16 @@ Simply put the current task to the end of its dummy runqueue.
 First, we create 5 queues in dummy_rq for tasks with different priority.  The function
 pick_next_task() will pick the first task in the dummy runqueue with highest priority.
 
-Once priority of a task is changed and the new priority falls in the range of dummy
-scheduler, we need to decide if we need to reschedule:
+Once priority of a task is changed (not by aging) and the new priority falls in the
+range of dummy scheduler, we need to decide if we need to signal rescheduling in the
+dummy functions:
 
     (1) Priority change from user side is done through set_user_nice(), this function already
         checks if rescheduling is required.
 
     (2) Priority change from the kernel side comes from function like set_scheduler() and
         rt_setmutex_prio(), all these functions call check_class_changed() to see if
-        rescheduling is required, this function will just call the dummy functions
+        rescheduling is required, which will just call the dummy functions
         prio_changed_dummy() or switched_to/from_dummy(), thus these functions are written to
         make rescheduling decision based on the state of the task and how priority is changed.
 
@@ -43,7 +51,7 @@ called. It will check if the task has higher priority than the current running t
 so, call resched_curr().
 
 
-4. Priority aging (disabled due to bug, I have a post on moodle asking for help XD....)
+4. Priority aging
 
 For aging two new fields are added to dummy_se, .waiting_time which represents how long
 the task has been waiting in the current dummy runqueue, as well as .prio_boost, which
@@ -56,5 +64,10 @@ running task, if .waiting_time exceeds DUMMY_AGE_THRESHOLD, the dynamic priority
 task will be boosted by one, and .waiting_time will be reset to zero. 
 
 After a task with boosted priority gets CPU, its priority will be maintained for one RR
-time_slice, after that it will be restored to its initial value.
+time_slice, after that it will be restored to its initial value to end aging status.
+
+The aging will also be ended when:
+(1) The priority of task is changed by other part of kernel or by user.
+(2) The task is created and enqueued for the first time.
+(3) The task sleeps.
 
